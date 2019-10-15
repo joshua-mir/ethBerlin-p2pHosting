@@ -254,6 +254,7 @@ impl sudo::Trait for Runtime {
 
 impl dat_verify::Trait for Runtime {
 	type Event = Event;
+	type Currency = Balances;
 }
 
 construct_runtime!(
@@ -269,7 +270,7 @@ construct_runtime!(
 		Indices: indices::{default, Config<T>},
 		Balances: balances,
 		Sudo: sudo,
-		DatVerify: dat_verify::{Module, Call, Storage, Event<T>},
+		DatVerify: dat_verify::{Module, Call, Storage, Config, Event<T>},
 	}
 );
 
