@@ -270,7 +270,7 @@ construct_runtime!(
 		Indices: indices::{default, Config<T>},
 		Balances: balances,
 		Sudo: sudo,
-		DatVerify: dat_verify::{Module, Call, Storage, Config, Event<T>},
+		DatVerify: dat_verify::{Module, Call, Storage, Event<T>},
 	}
 );
 

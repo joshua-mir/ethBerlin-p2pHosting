@@ -22,32 +22,26 @@ use support::{
 	traits::LockableCurrency,
 	traits::Imbalance
 };
-use core::convert::TryInto;
+use rstd::convert::{TryInto, TryFrom};
 use system::{ensure_signed, ensure_root};
 use codec::{Encode, Decode};
 use primitives::{
 	ed25519,
 	Hasher,
 	Blake2Hasher, 
-	H256,
-};
-use sr_primitives::{
-	traits::Zero,
-	traits::One
+	H256
 };
 use runtime_io::ed25519_verify;
 
 pub type Public = ed25519::Public;
 pub type Signature = ed25519::Signature;
+type BalanceOf<T> = <<T as Trait>::Currency as Currency<<T as system::Trait>::AccountId>>::Balance;
 
 /// The module's configuration trait.
-pub trait Trait: system::Trait where
-<Self as system::Trait>::Currency::NegativeImbalance: Imbalance<u128>,
-<Self as system::Trait>::Currency::PositiveImbalance: Imbalance<u128>
-{
+pub trait Trait: system::Trait{
 	type Event: From<Event<Self>> + Into<<Self as system::Trait>::Event>;
 	type Currency: 
-		Currency<Self::AccountId, Balance = u128> +
+		Currency<Self::AccountId> +
 		ReservableCurrency<Self::AccountId>;
 }
 
@@ -66,10 +60,10 @@ impl Node {
 	}
 
 	fn get_height(index : u64) -> u64 {
-		let mut bit_pointer = One::one();
-		let mut cur_height = Zero::zero();
+		let mut bit_pointer : u64 = 1;
+		let mut cur_height : u64 = 0;
 		while (index | bit_pointer) == index {
-			cur_height += One::one();
+			cur_height += 1;
 			bit_pointer *= 2;
 		}
 		cur_height
@@ -87,13 +81,13 @@ impl Node {
 	//get the last index at a given height, given a max leaf index
 	fn top_index_at_height(height : u64, max_index : u64) -> Option<u64> {
 		let offset = 2u64.pow(height.try_into().unwrap())-1;
-		let interval = 2u64.pow((height+One::one()).try_into().unwrap());
-		let mut furthest_leaf = Zero::zero();
+		let interval = 2u64.pow((height+1).try_into().unwrap());
+		let mut furthest_leaf = 0;
 		let mut result = None;
-		if height == Zero::zero() {
+		if height == 0 {
 			result = Some(max_index);
 		} else {
-			for i in Zero::zero()..height { //not inclusive of height intended
+			for i in 0..height { //not inclusive of height intended
 				furthest_leaf += 2u64.pow(i.try_into().unwrap());
 			}
 		}
@@ -123,13 +117,13 @@ impl Node {
 		//return n
 		//needs tests, this was written using trail and error.
 		let mut current_index = Some(max_index);
-		let mut current_height : u64 = Zero::zero();
-		while current_index.unwrap_or(Zero::zero()) > 2u64.pow(current_height.try_into().unwrap()) {
+		let mut current_height : u64 = 0;
+		while current_index.unwrap_or(0) > 2u64.pow(current_height.try_into().unwrap()) {
 			current_index = current_index
-				.unwrap_or(Zero::zero())
-				.checked_sub(2u64.pow((current_height+One::one()).try_into().unwrap()));
+				.unwrap_or(0)
+				.checked_sub(2u64.pow((current_height+1).try_into().unwrap()));
 			match current_index {
-				Some(_) => current_height += One::one(),
+				Some(_) => current_height += 1,
 				None => (),
 			}
 		}
@@ -141,7 +135,7 @@ impl Node {
 	//calculate the root hash
 	fn get_orphan_indeces(highest_index : u64) -> Vec<u64> {
 		let mut indeces : Vec<u64> = Vec::new();
-		for i in Zero::zero()..Self::highest_at_index(highest_index)+One::one() {
+		for i in 0..Self::highest_at_index(highest_index)+1 {
 			match Self::top_index_at_height(i, highest_index) {
 				Some(expr) => if expr % 2 == 0 {
 					indeces.push(expr);
@@ -237,7 +231,7 @@ decl_storage! {
 		Users get(user): map UserIdIndex => T::AccountId;
 		// each user has a vec of dats they seed
 		UsersStorage: map T::AccountId => Vec<Public>;
-		// each dat has a vecc of users pinning it
+		// each dat has a vec of users pinning it
 		DatHosters: map Public => Vec<T::AccountId>;
 		// each user has a mapping and vec of dats they want seeded
 		UserRequestsMap: map Public => T::AccountId;
@@ -258,23 +252,40 @@ impl<T: Trait> Module<T>{
 	//and should only (TODO) allow unreserving if {who} does not currently have active challenges.
     	fn reward(who: &T::AccountId, id: &Public){
 			//TODO
-			T::Currency::reserve(
-				who,
-				T::Currency::deposit_creating(who, <TreeSize>::get(id))
-			);
+			match <BalanceOf<T>>::try_from(<TreeSize>::get(id).try_into().unwrap()) {
+				Ok(tree_size) => {
+					T::Currency::deposit_creating(who, tree_size);
+				},
+				Err(e) => (),
+			}
     	}
     	//punish {who} based on the scale of {id}
     	fn punish(who: &T::AccountId, id: &Public){
 
-
-			let result = T::Currency::slash(who, <TreeSize>::get(id));
-			//remove specific item from UsersStorage;
-			//unless user is out of stake, then kill their account.
-			if result.1 == Zero::zero() {
-				//TODO
-			} else {
-				<UsersStorage<T>>::remove(who);
-				<UsersCount>::mutate(|m| *m -= One::one());
+			match <BalanceOf<T>>::try_from(<TreeSize>::get(id).try_into().unwrap()) {
+				Ok(tree_size) => {
+					let result = T::Currency::slash(who, tree_size);
+					//remove specific item from UsersStorage;
+					//unless user is out of stake, then kill their account.
+					let overflow = match result {
+						(_ , of) => of,
+					};
+						if overflow > 0.into() {
+							<UsersStorage<T>>::remove(who);
+							<UsersCount>::mutate(|m| *m -= 1);
+						} else {
+							let mut remove_id_from = <UsersStorage<T>>::get(who).clone();
+							remove_id_from.sort_unstable();
+							match remove_id_from.binary_search(id) {
+								Ok(id_index) => {
+									remove_id_from.remove(id_index);
+									<UsersStorage<T>>::insert(who, remove_id_from);
+								},
+								Err(_) => (),
+							}
+						}
+					},
+				Err(e) => (),
 			}
    		}
     	//charge based on the incentive of {id}
@@ -284,17 +295,17 @@ impl<T: Trait> Module<T>{
     	}
     	//set the scale of {id}
     	fn set_incentive(account: &T::AccountId, id: &Public, scale: u64){
-			let current_incentives = <Incentive<T>>::get(id);
-			current_incentives.sort_unstable_by_key(|&(a,b)| a);
-			let index_res = current_incentives.binary_search_by_key(account, |&(a,b)| a);
+			let mut current_incentives = <Incentive<T>>::get(id);
+			current_incentives.sort_unstable_by_key(|(a,b)| a.clone());
+			let index_res = current_incentives.clone().binary_search_by_key(&account.clone(), |(a,b)| a.clone());
 			match index_res {
 				Ok(index) => {
-					current_incentives.push((*account, scale));
+					current_incentives.push((account.clone(), scale));
 					current_incentives.swap_remove(index);
 					<Incentive<T>>::insert(id, current_incentives);
 				},
 				Err(index) => {
-					current_incentives.insert(index, (*account, scale));
+					current_incentives.insert(index, (account.clone(), scale));
 					<Incentive<T>>::insert(id, current_incentives);
 				},
 				_ => (),
@@ -312,7 +323,7 @@ decl_module! {
 			match dat_vec.last() {
 				Some(last_index) => {
 			// if no one is currently selected to give proof, select someone
-			if !<SelectedUser<T>>::exists() && <UsersCount>::get() > Zero::zero() {
+			if !<SelectedUser<T>>::exists() && <UsersCount>::get() > 0 {
 				let nonce = <Nonce>::get();
 				let new_random = (<system::Module<T>>::random_seed(), nonce)
 					.using_encoded(|b| Blake2Hasher::hash(b))
@@ -332,7 +343,7 @@ decl_module! {
 				<SelectedDat>::put((random_dat.clone(), random_leave));
 				<SelectedUser<T>>::put(&random_user);
 				<TimeLimit<T>>::put(future_block);
-				<Nonce>::mutate(|m| *m += One::one());
+				<Nonce>::mutate(|m| *m += 1);
 				Self::deposit_event(RawEvent::Challenge(random_user, future_block));
 			}},
 				None => (),
@@ -365,7 +376,7 @@ decl_module! {
 				"Proof is for the wrong chunk"
 			);
 			let payload = ChunkHashPayload{
-				hash_type : Zero::zero(),
+				hash_type : 0,
 				chunk_length : chunk_content.len() as u64,
 				chunk_content : chunk_content
 			};
@@ -426,7 +437,7 @@ decl_module! {
 		fn register_data(origin, merkle_root: (Public, RootHashPayload, Signature), incentive: u64) {
 			let account = ensure_signed(origin)?;
 			let pubkey = merkle_root.0;
-			let mut lowest_free_index : DatIdIndex = Zero::zero();
+			let mut lowest_free_index : DatIdIndex = 0;
 			let root_hash = merkle_root.1
 				.using_encoded(|b| Blake2Hasher::hash(b));
 			//FIXME: we don't currently verify if we are updating to a newer root from an older one.
@@ -449,12 +460,12 @@ decl_module! {
 					Some(index) => {
 						lowest_free_index = dat_vec.remove(0);
 						if dat_vec.is_empty() {
-							dat_vec.push(lowest_free_index + One::one());
+							dat_vec.push(lowest_free_index + 1);
 						}
 					},
 					None => {
 						//add an element if the vec is empty
-						dat_vec.push(One::one());
+						dat_vec.push(1);
 					},
 				}
 				//register new unknown dats
@@ -480,7 +491,7 @@ decl_module! {
 			let mut dat_vec = <DatId>::get();
 			match dat_vec.last() {
 				Some(last_index) => {
-					if index == last_index - One::one() {
+					if index == last_index - 1 {
 						dat_vec.pop();
 					}
 					dat_vec.push(index);
@@ -537,10 +548,10 @@ decl_module! {
 				dat_hosters.dedup();
 				<DatHosters<T>>::insert(&dat_pubkey, &dat_hosters);
 				<UsersStorage<T>>::insert(&account, &current_user_dats);
-				<Nonce>::mutate(|m| *m += One::one());
-				if(current_user_dats.len() == One::one()){
+				<Nonce>::mutate(|m| *m += 1);
+				if(current_user_dats.len() == 1){
 					<Users<T>>::insert(<UsersCount>::get(), &account);
-					<UsersCount>::mutate(|m| *m += One::one());
+					<UsersCount>::mutate(|m| *m += 1);
 				}
 				Self::deposit_event(RawEvent::NewPin(account, dat_pubkey));
 				},
